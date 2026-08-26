@@ -103,6 +103,26 @@ def test_cumulative_returns_dataframe_matches_upstream(returns, factor):
     )
 
 
+@pytest.mark.parametrize("size", [7, 8])
+def test_cumulative_returns_simd_tail_matches_upstream(size):
+    values = pd.Series(np.linspace(-0.02, 0.03, size))
+    values.iloc[2] = np.nan
+    pd.testing.assert_series_equal(
+        mojo.cum_returns(values, 100), upstream.cum_returns(values, 100)
+    )
+
+
+@pytest.mark.parametrize("rows", [104_857, 104_859])
+def test_cumulative_returns_parallel_threshold_and_column_tail(rows):
+    rng = np.random.default_rng(73)
+    values = rng.normal(0.0002, 0.01, (rows, 10))
+    values[13, 3] = np.nan
+    frame = pd.DataFrame(values)
+    pd.testing.assert_frame_equal(
+        mojo.cum_returns(frame, 1), upstream.cum_returns(frame, 1)
+    )
+
+
 def test_factor_metrics_match_upstream(returns, factor):
     assert mojo.alpha(returns, factor) == pytest.approx(upstream.alpha(returns, factor))
     assert mojo.beta(returns, factor) == pytest.approx(upstream.beta(returns, factor))

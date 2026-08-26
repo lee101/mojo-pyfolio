@@ -86,7 +86,7 @@ the repository's Python 3.13 environment. Tests therefore import the real
 `pyfolio` module from `pyfolio-reloaded` 0.9.7, the maintained continuation
 available on conda-forge. Its API descends directly from Quantopian pyfolio.
 
-There are 45 pytest cases comparing scalar values, complete Series and
+There are 49 pytest cases comparing scalar values, complete Series and
 DataFrames, indices, column types, NaNs, drawdown dates, bootstrap samples,
 positions, transactions, invalid FFI dimensions, SIMD tails, the parallel
 threshold, and edge cases.
@@ -102,21 +102,20 @@ on identical float64 inputs.
 
 | benchmark | mojo-pyfolio | pyfolio | speedup |
 | --- | ---: | ---: | ---: |
-| `max_drawdown`, 5M returns | 11.16 ms | 224.32 ms | 20.10x |
-| `cum_returns`, 5M returns | 37.57 ms | 232.56 ms | 6.19x |
-| `rolling_volatility`, 2M window 126 | 28.04 ms | 150.35 ms | 5.36x |
-| `rolling_beta`, 3k window 126 | 0.96 ms | 1439.94 ms | 1496.81x |
-| `summarize_paths`, 20k x 252 | 12.86 ms | 132.00 ms | 10.26x |
-| `perf_stats`, 5M returns | 287.11 ms | 3194.18 ms | 11.13x |
+| `max_drawdown`, 5M returns | 10.90 ms | 164.57 ms | 15.10x |
+| `cum_returns`, 5M returns | 19.12 ms | 100.28 ms | 5.24x |
+| `rolling_volatility`, 2M window 126 | 15.60 ms | 81.23 ms | 5.21x |
+| `rolling_beta`, 3k window 126 | 0.58 ms | 1427.39 ms | 2459.85x |
+| `summarize_paths`, 20k x 252 | 12.20 ms | 94.17 ms | 7.72x |
+| `perf_stats`, 5M returns | 226.02 ms | 3952.51 ms | 17.49x |
 
 The rolling-beta gap is unusually large because upstream iterates over pandas
 label slices and runs a fresh regression for every row. The Mojo kernel keeps
 five rolling sums and does constant work per row. `perf_stats` computes its
-second through fourth central moments in two SIMD passes and parallelizes those
-passes for large inputs; it also selects both tail percentiles in one
-NumPy call. Maximum drawdown uses a dedicated recurrence instead of running the
-full performance-summary kernel, and each rolling API allocates and computes
-only the output it returns.
+second through fourth central moments in two SIMD passes and selects both tail
+percentiles in one NumPy call. Maximum drawdown uses a dedicated recurrence
+instead of running the full performance-summary kernel, and each rolling API
+allocates and computes only the output it returns.
 
 No GPU path is included. The array kernels are sequential wealth/rolling
 recurrences or bandwidth-bound reductions. Host/device transfers and launch
@@ -127,7 +126,7 @@ execution path.
 
 `src/kernels.mojo` is one compilation unit exporting a small C ABI. Python
 passes array buffers as integer addresses through ctypes; each Mojo export
-reconstructs an `UnsafePointer[Float64, AnyOrigin[mut=True]]`. Python-owned
+reconstructs a `Pointer[Float64, AnyOrigin[mut=True]]`. Python-owned
 NumPy arrays remain alive for each synchronous call, so there is no
 cross-language allocator or cleanup protocol.
 
@@ -146,8 +145,11 @@ no pointer is retained after a call returns.
 The return-summary kernel fuses NaN-aware first and second moments, downside
 and Omega accumulators, cumulative wealth, maximum drawdown, and cumulative-log
 regression terms. Higher central moments use native-width float64 SIMD with a
-scalar remainder loop and a bounded worker count for large arrays. Rolling
-volatility, Sharpe, and beta use add-entering / subtract-leaving sums, reducing
-pyfolio's rolling beta from repeated window-sized regressions to O(n).
+scalar remainder loop. Cumulative returns use native-width block loads and
+stores while retaining lane order for exact Series parity; multi-column inputs
+vectorize across independent columns and use bounded synchronous parallelism
+above 1,048,576 elements. Rolling volatility, Sharpe, and beta use add-entering
+and subtract-leaving sums, reducing pyfolio's rolling beta from repeated
+window-sized regressions to O(n).
 
 MIT licensed.

@@ -1,11 +1,14 @@
 """Portfolio return kernels exported through a stable C ABI."""
 
+from max.algorithm import sync_parallelize
 from std.math import isnan, log, sqrt
 from std.sys.info import num_physical_cores, simd_width_of as simdwidthof
 
 comptime Ptr = Pointer[Float64, AnyOrigin[mut=True]]
 comptime MOMENT_WORKERS = 8
 comptime PARALLEL_MOMENT_ELEMENTS = 1_048_576
+comptime CUM_RETURN_WORKERS = 8
+comptime PARALLEL_CUM_RETURN_ELEMENTS = 1_048_576
 
 
 @always_inline
@@ -21,12 +24,23 @@ def mpf_cum_returns(
     columns: Int,
     starting_value: Float64,
 ) abi("C"):
+    comptime W = simdwidthof[DType.float64]()
     var source = ptr(source_address)
     var destination = ptr(destination_address)
     if columns == 1:
         var wealth = 1.0
         var index = 0
         if starting_value == 0.0:
+            while index + W <= rows:
+                var values = source.unsafe_load[width=W](offset=index)
+                var cumulative = SIMD[DType.float64, W](0.0)
+                comptime for lane in range(W):
+                    var value = values[lane]
+                    if not isnan(value):
+                        wealth *= 1.0 + value
+                    cumulative[lane] = wealth - 1.0
+                destination.unsafe_store(index, cumulative)
+                index += W
             while index < rows:
                 var value = source[unsafe_offset=index]
                 if not isnan(value):
@@ -34,6 +48,16 @@ def mpf_cum_returns(
                 destination[unsafe_offset=index] = wealth - 1.0
                 index += 1
         else:
+            while index + W <= rows:
+                var values = source.unsafe_load[width=W](offset=index)
+                var cumulative = SIMD[DType.float64, W](0.0)
+                comptime for lane in range(W):
+                    var value = values[lane]
+                    if not isnan(value):
+                        wealth *= 1.0 + value
+                    cumulative[lane] = wealth * starting_value
+                destination.unsafe_store(index, cumulative)
+                index += W
             while index < rows:
                 var value = source[unsafe_offset=index]
                 if not isnan(value):
@@ -42,7 +66,43 @@ def mpf_cum_returns(
                 index += 1
         return
 
-    for column in range(columns):
+    var vector_groups = columns // W
+    var workers = min(num_physical_cores(), CUM_RETURN_WORKERS)
+    workers = min(workers, vector_groups)
+    if rows * columns < PARALLEL_CUM_RETURN_ELEMENTS:
+        workers = 1
+    workers = max(workers, 1)
+
+    @__parameter
+    def process_vector_groups(worker: Int):
+        var source = ptr(source_address)
+        var destination = ptr(destination_address)
+        var first_group = worker * vector_groups // workers
+        var last_group = (worker + 1) * vector_groups // workers
+        for group in range(first_group, last_group):
+            var column = group * W
+            var wealth = SIMD[DType.float64, W](1.0)
+            for row in range(rows):
+                var offset = row * columns + column
+                var values = source.unsafe_load[width=W](offset=offset)
+                var valid = values.eq(values)
+                wealth *= valid.select(
+                    values + 1.0, SIMD[DType.float64, W](1.0)
+                )
+                destination.unsafe_store(
+                    offset,
+                    wealth - 1.0
+                    if starting_value == 0.0
+                    else wealth * starting_value,
+                )
+
+    if vector_groups > 0:
+        if workers > 1:
+            sync_parallelize[process_vector_groups](workers)
+        else:
+            process_vector_groups(0)
+
+    for column in range(vector_groups * W, columns):
         var wealth = 1.0
         for row in range(rows):
             var value = source[unsafe_offset=row * columns + column]
