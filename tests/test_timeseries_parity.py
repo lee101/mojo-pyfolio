@@ -113,7 +113,7 @@ def test_cumulative_returns_simd_tail_matches_upstream(size):
 
 
 @pytest.mark.parametrize("rows", [104_857, 104_859])
-def test_cumulative_returns_parallel_threshold_and_column_tail(rows):
+def test_cumulative_returns_column_tail_across_input_sizes(rows):
     rng = np.random.default_rng(73)
     values = rng.normal(0.0002, 0.01, (rows, 10))
     values[13, 3] = np.nan
@@ -202,7 +202,7 @@ def test_perf_stats_matches_upstream(returns, factor):
 
 
 @pytest.mark.parametrize("size", [7, 1_048_579])
-def test_central_moment_simd_tail_and_parallel_threshold(size):
+def test_central_moment_simd_tail_across_input_sizes(size):
     values = np.random.default_rng(71).normal(0.0003, 0.012, size)
     mean, second, third, fourth = central_moments(values)
     centered = values - np.mean(values)

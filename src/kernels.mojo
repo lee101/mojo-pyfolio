@@ -1,14 +1,16 @@
 """Portfolio return kernels exported through a stable C ABI."""
 
-from max.algorithm import sync_parallelize
 from std.math import isnan, log, sqrt
 from std.sys.info import num_physical_cores, simd_width_of as simdwidthof
 
 comptime Ptr = Pointer[Float64, AnyOrigin[mut=True]]
-comptime MOMENT_WORKERS = 8
-comptime PARALLEL_MOMENT_ELEMENTS = 1_048_576
-comptime CUM_RETURN_WORKERS = 8
-comptime PARALLEL_CUM_RETURN_ELEMENTS = 1_048_576
+# These size a serial partition, not a thread pool.  Mojo 1.2.0 cannot capture
+# these pointers into a parallel body, and both loops are memory bound, so the
+# chunk count only decides how the work is grouped before the final reduction.
+comptime MOMENT_CHUNKS = 8
+comptime MOMENT_CHUNK_MIN_ELEMENTS = 1_048_576
+comptime CUM_RETURN_CHUNKS = 8
+comptime CUM_RETURN_CHUNK_MIN_ELEMENTS = 1_048_576
 
 
 @always_inline
@@ -67,18 +69,18 @@ def mpf_cum_returns(
         return
 
     var vector_groups = columns // W
-    var workers = min(num_physical_cores(), CUM_RETURN_WORKERS)
-    workers = min(workers, vector_groups)
-    if rows * columns < PARALLEL_CUM_RETURN_ELEMENTS:
-        workers = 1
-    workers = max(workers, 1)
+    var chunks = min(num_physical_cores(), CUM_RETURN_CHUNKS)
+    chunks = min(chunks, vector_groups)
+    if rows * columns < CUM_RETURN_CHUNK_MIN_ELEMENTS:
+        chunks = 1
+    chunks = max(chunks, 1)
 
     @__parameter
-    def process_vector_groups(worker: Int):
+    def process_vector_groups(chunk: Int):
         var source = ptr(source_address)
         var destination = ptr(destination_address)
-        var first_group = worker * vector_groups // workers
-        var last_group = (worker + 1) * vector_groups // workers
+        var first_group = chunk * vector_groups // chunks
+        var last_group = (chunk + 1) * vector_groups // chunks
         for group in range(first_group, last_group):
             var column = group * W
             var wealth = SIMD[DType.float64, W](1.0)
@@ -97,10 +99,8 @@ def mpf_cum_returns(
                 )
 
     if vector_groups > 0:
-        if workers > 1:
-            sync_parallelize[process_vector_groups](workers)
-        else:
-            process_vector_groups(0)
+        for chunk in range(chunks):
+            process_vector_groups(chunk)
 
     for column in range(vector_groups * W, columns):
         var wealth = 1.0
@@ -214,20 +214,20 @@ def mpf_central_moments(
     source_address: Int, length: Int, result_address: Int
 ) abi("C"):
     """Return the mean and biased central moments two through four."""
-    var workers = min(num_physical_cores(), MOMENT_WORKERS)
-    if length < PARALLEL_MOMENT_ELEMENTS:
-        workers = 1
-    workers = max(workers, 1)
+    var chunks = min(num_physical_cores(), MOMENT_CHUNKS)
+    if length < MOMENT_CHUNK_MIN_ELEMENTS:
+        chunks = 1
+    chunks = max(chunks, 1)
 
     @__parameter
-    def sum_chunk(worker: Int):
+    def sum_chunk(chunk: Int):
         comptime W = simdwidthof[DType.float64]()
         var source = ptr(source_address)
         var partial = ptr(result_address)
         var vectors = length // W
-        var start = (worker * vectors // workers) * W
-        var end = ((worker + 1) * vectors // workers) * W
-        if worker == workers - 1:
+        var start = (chunk * vectors // chunks) * W
+        var end = ((chunk + 1) * vectors // chunks) * W
+        if chunk == chunks - 1:
             end = length
         var vector_sum = SIMD[DType.float64, W](0.0)
         var index = start
@@ -238,26 +238,26 @@ def mpf_central_moments(
         while index < end:
             total += source[unsafe_offset=index]
             index += 1
-        partial[unsafe_offset=worker] = total
+        partial[unsafe_offset=chunk] = total
 
-    for worker in range(workers):
-        sum_chunk(worker)
+    for chunk in range(chunks):
+        sum_chunk(chunk)
 
     var result = ptr(result_address)
     var total = 0.0
-    for worker in range(workers):
-        total += result[unsafe_offset=worker]
+    for chunk in range(chunks):
+        total += result[unsafe_offset=chunk]
     var mean = total / Float64(length)
 
     @__parameter
-    def moment_chunk(worker: Int):
+    def moment_chunk(chunk: Int):
         comptime W = simdwidthof[DType.float64]()
         var source = ptr(source_address)
         var partial = ptr(result_address)
         var vectors = length // W
-        var start = (worker * vectors // workers) * W
-        var end = ((worker + 1) * vectors // workers) * W
-        if worker == workers - 1:
+        var start = (chunk * vectors // chunks) * W
+        var end = ((chunk + 1) * vectors // chunks) * W
+        if chunk == chunks - 1:
             end = length
         var second = SIMD[DType.float64, W](0.0)
         var third = SIMD[DType.float64, W](0.0)
@@ -280,20 +280,20 @@ def mpf_central_moments(
             third_total += squared * delta
             fourth_total += squared * squared
             index += 1
-        partial[unsafe_offset=worker * 3] = second_total
-        partial[unsafe_offset=worker * 3 + 1] = third_total
-        partial[unsafe_offset=worker * 3 + 2] = fourth_total
+        partial[unsafe_offset=chunk * 3] = second_total
+        partial[unsafe_offset=chunk * 3 + 1] = third_total
+        partial[unsafe_offset=chunk * 3 + 2] = fourth_total
 
-    for worker in range(workers):
-        moment_chunk(worker)
+    for chunk in range(chunks):
+        moment_chunk(chunk)
 
     var second_total = 0.0
     var third_total = 0.0
     var fourth_total = 0.0
-    for worker in range(workers):
-        second_total += result[unsafe_offset=worker * 3]
-        third_total += result[unsafe_offset=worker * 3 + 1]
-        fourth_total += result[unsafe_offset=worker * 3 + 2]
+    for chunk in range(chunks):
+        second_total += result[unsafe_offset=chunk * 3]
+        third_total += result[unsafe_offset=chunk * 3 + 1]
+        fourth_total += result[unsafe_offset=chunk * 3 + 2]
     result[unsafe_offset=0] = mean
     result[unsafe_offset=1] = second_total / Float64(length)
     result[unsafe_offset=2] = third_total / Float64(length)

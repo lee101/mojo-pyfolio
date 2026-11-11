@@ -88,8 +88,8 @@ available on conda-forge. Its API descends directly from Quantopian pyfolio.
 
 There are 49 pytest cases comparing scalar values, complete Series and
 DataFrames, indices, column types, NaNs, drawdown dates, bootstrap samples,
-positions, transactions, invalid FFI dimensions, SIMD tails, the parallel
-threshold, and edge cases.
+positions, transactions, invalid FFI dimensions, SIMD tails, multi-column
+layouts, and edge cases.
 The conda-forge build currently resolves empyrical 0.5.9, which references
 NumPy's removed `NINF` alias; the test harness supplies that alias only while
 calling upstream. mojo-pyfolio itself does not depend on empyrical.
@@ -147,9 +147,11 @@ and Omega accumulators, cumulative wealth, maximum drawdown, and cumulative-log
 regression terms. Higher central moments use native-width float64 SIMD with a
 scalar remainder loop. Cumulative returns use native-width block loads and
 stores while retaining lane order for exact Series parity; multi-column inputs
-vectorize across independent columns and use bounded synchronous parallelism
-above 1,048,576 elements. Rolling volatility, Sharpe, and beta use add-entering
-and subtract-leaving sums, reducing pyfolio's rolling beta from repeated
-window-sized regressions to O(n).
+vectorize across independent columns. Those columns are visited in sequence
+rather than in parallel: each one is a streaming read-modify-write of
+`rows * columns` doubles, about four floating-point operations per 16 bytes
+1,048,576-element threshold that selected between the two is gone. Rolling
+volatility, Sharpe, and beta use add-entering and subtract-leaving sums,
+reducing pyfolio's rolling beta from repeated window-sized regressions to O(n).
 
 MIT licensed.
